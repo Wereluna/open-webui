@@ -71,6 +71,7 @@
 	let renderMarkdownInUserMessages = true;
 	let renderMarkdownInAssistantMessages = true;
 	let expandDetails = false;
+	let chatHoverPreview = true;
 	let renderMarkdownInPreviews = true;
 	let showChatTitleInTab = true;
 
@@ -247,6 +248,7 @@
 		renderMarkdownInUserMessages = $settings?.renderMarkdownInUserMessages ?? true;
 		renderMarkdownInAssistantMessages = $settings?.renderMarkdownInAssistantMessages ?? true;
 		expandDetails = $settings?.expandDetails ?? false;
+		chatHoverPreview = $settings?.chatHoverPreview ?? true;
 		renderMarkdownInPreviews = $settings?.renderMarkdownInPreviews ?? true;
 
 		landingPageMode = $settings?.landingPageMode ?? '';
@@ -1087,6 +1089,30 @@
 				</div>
 				<p class={settingDescriptionClass}>
 					{$i18n.t('Open detail blocks by default.')}
+				</p>
+			</div>
+
+			<div>
+				<div class={settingRowClass}>
+					<div id="chat-hover-preview-label" class={settingLabelClass}>
+						{$i18n.t('Chat Hover Previews')}
+					</div>
+
+					<div class={settingControlClass}>
+						<Switch
+							ariaLabelledbyId="chat-hover-preview-label"
+							tooltip={true}
+							bind:state={chatHoverPreview}
+							on:change={() => {
+								saveSettings({ chatHoverPreview });
+							}}
+						/>
+					</div>
+				</div>
+				<p class={settingDescriptionClass}>
+					{$i18n.t(
+						'Show a floating preview of recent messages when hovering a chat in the sidebar.'
+					)}
 				</p>
 			</div>
 
