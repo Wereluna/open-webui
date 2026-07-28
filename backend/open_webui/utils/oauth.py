@@ -1550,7 +1550,7 @@ class OAuthManager:
 
         return role
 
-    async def update_user_groups(self, user, user_data, default_permissions, db=None):
+    async def update_user_groups(self, request, user, user_data, default_permissions, db=None):
         auth_config = await get_oauth_runtime_config()
         log.debug('Running OAUTH Group management')
         oauth_claim = auth_config.OAUTH_GROUPS_CLAIM
@@ -1612,6 +1612,13 @@ class OAuthManager:
                             groups_created = True
                             # Add to local set to prevent duplicate creation attempts in this run
                             all_group_names.add(group_name)
+                            await publish_event(
+                                request,
+                                EVENTS.GROUP_CREATED,
+                                subject_id=created_group.id,
+                                source='oauth',
+                                data={'name': created_group.name},
+                            )
                         else:
                             log.error(f"Failed to create group '{group_name}' via OAuth.")
                     except Exception as e:
@@ -1636,7 +1643,15 @@ class OAuthManager:
             ):
                 # Remove group from user
                 log.debug(f'Removing user from group {group_model.name} as it is no longer in their oauth groups')
-                await Groups.remove_users_from_group(group_model.id, [user.id], db=db)
+                if await Groups.remove_users_from_group(group_model.id, [user.id], db=db):
+                    await publish_event(
+                        request,
+                        EVENTS.GROUP_MEMBER_REMOVED,
+                        actor=user,
+                        subject_id=group_model.id,
+                        source='oauth',
+                        data={'user_ids': [user.id]},
+                    )
 
                 # In case a group is created, but perms are never assigned to the group by hitting "save"
                 group_permissions = group_model.permissions
@@ -1665,7 +1680,15 @@ class OAuthManager:
                 # Add user to group
                 log.debug(f'Adding user to group {group_model.name} as it was found in their oauth groups')
 
-                await Groups.add_users_to_group(group_model.id, [user.id], db=db)
+                if await Groups.add_users_to_group(group_model.id, [user.id], db=db):
+                    await publish_event(
+                        request,
+                        EVENTS.GROUP_MEMBER_ADDED,
+                        actor=user,
+                        subject_id=group_model.id,
+                        source='oauth',
+                        data={'user_ids': [user.id]},
+                    )
 
                 # In case a group is created, but perms are never assigned to the group by hitting "save"
                 group_permissions = group_model.permissions
@@ -2014,6 +2037,7 @@ class OAuthManager:
             )
             if auth_config.ENABLE_OAUTH_GROUP_MANAGEMENT:
                 await self.update_user_groups(
+                    request=request,
                     user=user,
                     user_data=user_data,
                     default_permissions=await Config.get('user.permissions'),
