@@ -2417,10 +2417,7 @@ async def query_chat_files(
         if not embedding_function and not full_context:
             return json.dumps({'error': 'Embedding function not configured'})
 
-        user_model = UserModel.model_construct(
-            id=__user__.get('id'),
-            role=__user__.get('role', 'user'),
-        )
+        user_model = UserModel.model_validate(__user__)
         sources = await get_sources_from_items(
             request=__request__,
             items=file_items,
@@ -3050,7 +3047,7 @@ async def query_knowledge_files(
         embedding_function = getattr(__request__.app.state, 'EMBEDDING_FUNCTION', None)
         if not embedding_function:
             return json.dumps({'error': 'Embedding function not configured'})
-        user_model = UserModel.model_construct(id=user_id, role=user_role)
+        user_model = UserModel.model_validate(__user__)
 
         collection_names = []
         external_knowledges = []
@@ -3244,7 +3241,7 @@ async def query_knowledge_bases(
         embedding_function = getattr(__request__.app.state, 'EMBEDDING_FUNCTION', None)
         if not embedding_function:
             return json.dumps({'error': 'Embedding function not configured'})
-        user_model = UserModel.model_construct(id=user_id, role=__user__.get('role', 'user'))
+        user_model = UserModel.model_validate(__user__)
         query_embedding = await embedding_function(query, prefix=RAG_EMBEDDING_QUERY_PREFIX, user=user_model)
 
         # Min-heap of (distance, knowledge_base_id) - only holds top `count` results
