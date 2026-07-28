@@ -835,6 +835,7 @@ class ChatTable:
     @staticmethod
     def upsert_message_to_history(history: dict, message_id: str, message: dict) -> dict:
         messages = history.setdefault('messages', {})
+        is_new = message_id not in messages
 
         if message_id in messages:
             messages[message_id] = {
@@ -875,7 +876,25 @@ class ChatTable:
                 'timestamp': message.get('timestamp') or int(time.time()),
             }
 
-        history['currentId'] = message_id
+        # New messages always become the tip: a regenerated answer or an edited
+        # prompt is a sibling of the current leaf, not a descendant, and must
+        # show. Updates to existing messages only advance the tip when they land
+        # on the current branch at or below it — background writes to ancestors
+        # (outlet filters, context compaction checkpoints) must not re-point the
+        # branch at them and truncate the visible history.
+        current_id = history.get('currentId')
+        if is_new or current_id not in messages:
+            history['currentId'] = message_id
+        else:
+            node = message_id
+            seen = set()
+            while node and node not in seen:
+                if node == current_id:
+                    history['currentId'] = message_id
+                    break
+                seen.add(node)
+                node = (messages.get(node) or {}).get('parentId')
+
         return messages[message_id]
 
     async def backfill_messages_by_chat_id(self, chat_id: str, user_id: str, messages: dict[str, dict]) -> None:
