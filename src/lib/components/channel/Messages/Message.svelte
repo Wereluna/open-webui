@@ -210,7 +210,7 @@
 		>
 			{#if !edit && !disabled}
 				<div
-					class=" absolute {showButtons ? '' : 'invisible group-hover:visible'} right-1 -top-2 z-10"
+					class=" absolute {showButtons ? '' : 'invisible group-hover:visible'} right-1 -top-7 z-30"
 				>
 					<div
 						class="flex gap-1 rounded-lg bg-white dark:bg-gray-850 shadow-md p-0.5 border border-gray-100/30 dark:border-gray-850/30"
