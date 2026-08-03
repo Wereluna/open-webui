@@ -106,6 +106,16 @@ class Chat(Base):  # database table mapping for chat entity
             sqlite_where=text('timer_at IS NOT NULL'),
             postgresql_where=text('timer_at IS NOT NULL'),
         ),
+        # timer_at key column turns the IS NOT NULL into a seek, so this beats the plain user_id indexes
+        Index(
+            'user_id_timer_at_idx',
+            'user_id',
+            'timer_at',
+            sqlite_where=text('timer_at IS NOT NULL'),
+            postgresql_where=text('timer_at IS NOT NULL'),
+        ),
+        # covering index: lets SQLite serve count_unread_by_folder_ids without reading chat rows
+        Index('user_id_folder_unread_idx', 'user_id', 'folder_id', 'archived', 'updated_at', 'last_read_at', 'id'),
     )
 
 
