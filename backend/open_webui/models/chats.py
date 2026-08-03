@@ -99,6 +99,7 @@ class Chat(Base):  # database table mapping for chat entity
         Index('user_id_archived_idx', 'user_id', 'archived'),
         Index('updated_at_user_id_idx', 'updated_at', 'user_id'),
         Index('folder_id_user_id_idx', 'folder_id', 'user_id'),
+        Index('user_id_updated_at_id_idx', 'user_id', updated_at.desc(), 'id'),
         Index(
             'timer_at_idx',
             'timer_at',
