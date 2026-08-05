@@ -188,7 +188,7 @@
 			</div>
 		</div>
 
-		<div class=" max-h-full w-full overflow-y-auto" bind:this={messagesContainerElement}>
+		<div class=" max-h-full w-full overflow-y-auto pt-7" bind:this={messagesContainerElement}>
 			{#if messages !== null}
 				<Messages
 					id={threadId}
