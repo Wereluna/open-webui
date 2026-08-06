@@ -10,7 +10,7 @@
 	dayjs.extend(isYesterday);
 	dayjs.extend(localizedFormat);
 
-	import { getContext, onMount } from 'svelte';
+	import { getContext } from 'svelte';
 	const i18n = getContext<Writable<i18nType>>('i18n');
 
 	import { formatDate } from '$lib/utils';
@@ -137,22 +137,53 @@
 		swipeLocked = false;
 	};
 
+	// `data === true` is the backend's "there is data, fetch it separately" sentinel.
+	// Guarded so a slow or failing fetch cannot be re-entered by the reactive
+	// statement below, and a failure does not retry in a loop.
+	let loadingMessageData = false;
+	let messageDataLoadFailed = false;
+
 	const loadMessageData = async () => {
-		if (message && message?.data === true) {
+		if (!message || message?.data !== true || loadingMessageData || messageDataLoadFailed) {
+			return;
+		}
+
+		loadingMessageData = true;
+		try {
 			const res = await getMessageData(localStorage.token, channel?.id, message.id);
 			if (res) {
 				message.data = res;
+			} else {
+				messageDataLoadFailed = true;
 			}
+		} catch (error) {
+			console.error('Failed to load message data:', error);
+			messageDataLoadFailed = true;
+		} finally {
+			loadingMessageData = false;
 		}
 	};
 
-	onMount(async () => {
-		if (message && message?.data === true) {
-			await loadMessageData();
-		}
-	});
+	// Not onMount: pin, reaction and reply updates replace the message object and
+	// can reintroduce the sentinel, and the keyed {#each} reuses this component
+	// instead of remounting it — so a mount-only fetch would not run again for the
+	// life of that instance, leaving the message on its loading indicator until
+	// something remounts it.
+	$: if (message?.data === true) {
+		loadMessageData();
+	}
 
-	$: messageOutput = Array.isArray(message?.data?.output) ? message.data.output : [];
+	// Hold on to the payload once resolved. When an update puts the sentinel back,
+	// the content stays on screen while it is re-fetched instead of flashing the
+	// loading indicator. Safe to keep for the component's lifetime: the list is
+	// keyed by message id, so an instance only ever renders one message.
+	let resolvedData = null;
+	$: if (message?.data && message.data !== true) {
+		resolvedData = message.data;
+	}
+	$: messageData = message?.data && message.data !== true ? message.data : resolvedData;
+
+	$: messageOutput = Array.isArray(messageData?.output) ? messageData.output : [];
 	$: hasStructuredOutput = buildOutputDisplayItems(messageOutput).length > 0;
 </script>
 
@@ -455,17 +486,17 @@
 						</Name>
 					{/if}
 
-					{#if message?.data === true}
-						<!-- loading indicator -->
+					{#if message?.data === true && !resolvedData}
+						<!-- loading indicator, only when there is nothing to show yet -->
 						<div class=" my-2">
 							<Skeleton />
 						</div>
-					{:else if (message?.data?.files ?? []).length > 0}
+					{:else if (messageData?.files ?? []).length > 0}
 						<div
 							class="my-2.5 w-full flex overflow-x-auto gap-2 flex-wrap"
 							dir={$settings?.chatDirection ?? 'auto'}
 						>
-							{#each message?.data?.files as file}
+							{#each messageData?.files as file}
 								{@const fileUrl =
 									file.url.startsWith('data') || file.url.startsWith('http')
 										? file.url
