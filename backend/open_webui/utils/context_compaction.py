@@ -10,7 +10,6 @@ from open_webui.utils.chat_id import is_saved_chat_id
 from open_webui.utils.json_codec import JSONCodec
 from open_webui.utils.misc import get_content_from_message, get_last_user_message, get_message_list
 from open_webui.utils.task import (
-    get_task_model_id,
     prompt_template,
     prompt_variables_template,
     replace_messages_variable,
@@ -364,25 +363,10 @@ async def _generate_summary(
 ) -> str:
     from open_webui.utils.chat import generate_chat_completion
 
-    task_config = await Config.get_many(
-        'task.model.default',
-        'task.model.external',
-        'chat.context_compaction.model',
-    )
-    context_compaction_model = task_config.get('chat.context_compaction.model')
-    task_model_id = (
-        context_compaction_model
-        if context_compaction_model in models
-        else get_task_model_id(
-            model_id,
-            task_config.get('task.model.default'),
-            task_config.get('task.model.external'),
-            models,
-        )
-    )
-    if task_model_id not in models:
-        task_model_id = model_id
-    if task_model_id not in models:
+    configured_model_id = await Config.get('chat.context_compaction.model')
+    # Unset or unavailable falls back to the active chat model, never the generic task model.
+    compaction_model_id = configured_model_id if configured_model_id in models else model_id
+    if compaction_model_id not in models:
         raise ValueError('No available model for context compaction')
 
     summary_prompt_template = summary_prompt_template.strip() or DEFAULT_CONTEXT_COMPACTION_PROMPT
@@ -394,14 +378,14 @@ async def _generate_summary(
     prompt = prompt_variables_template(prompt, {'{{PREVIOUS_SUMMARY}}': previous_summary or ''})
     prompt = await prompt_template(prompt, user)
 
-    max_tokens = models[task_model_id].get('info', {}).get('params', {}).get('max_tokens', 1000)
+    max_tokens = models[compaction_model_id].get('info', {}).get('params', {}).get('max_tokens', 1000)
     payload = {
-        'model': task_model_id,
+        'model': compaction_model_id,
         'messages': [{'role': 'user', 'content': prompt}],
         'stream': False,
         **(
             {'max_tokens': max_tokens}
-            if models[task_model_id].get('owned_by') == 'ollama'
+            if models[compaction_model_id].get('owned_by') == 'ollama'
             else {'max_completion_tokens': max_tokens}
         ),
         'metadata': {
