@@ -1681,4 +1681,9 @@ async def token_exchange(
             detail='User not found. Please sign in via the web interface first.',
         )
 
+    role = await oauth_manager.get_user_role(user, user_data, deny_on_missing_roles=True)
+    if user.role != role:
+        await Users.update_user_role_by_id(user.id, role, db=db)
+        user.role = role
+
     return await create_session_response(request, user, db, source='oauth')
