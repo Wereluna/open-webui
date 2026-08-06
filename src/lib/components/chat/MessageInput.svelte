@@ -666,6 +666,8 @@
 	type ModelCapability =
 		| 'vision'
 		| 'file_upload'
+		| 'file_processing'
+		| 'native_file_input'
 		| 'web_search'
 		| 'image_generation'
 		| 'code_interpreter'
@@ -680,8 +682,9 @@
 	const getCapableModelIds = (
 		modelIds: string[],
 		capability: ModelCapability,
-		capabilitiesById: ModelCapabilitiesById
-	) => modelIds.filter((id) => capabilitiesById[id]?.[capability] ?? true);
+		capabilitiesById: ModelCapabilitiesById,
+		defaultEnabled = true
+	) => modelIds.filter((id) => capabilitiesById[id]?.[capability] ?? defaultEnabled);
 
 	let visionCapableModels = [];
 	$: visionCapableModels = getCapableModelIds(selectedModelIds, 'vision', modelCapabilitiesById);
@@ -691,6 +694,22 @@
 		selectedModelIds,
 		'file_upload',
 		modelCapabilitiesById
+	);
+
+	let fileProcessingCapableModels = [];
+	$: fileProcessingCapableModels = getCapableModelIds(
+		selectedModelIds,
+		'file_processing',
+		modelCapabilitiesById
+	);
+
+	// Default false: only models that explicitly enable native provider file inputs.
+	let nativeFileInputCapableModels = [];
+	$: nativeFileInputCapableModels = getCapableModelIds(
+		selectedModelIds,
+		'native_file_input',
+		modelCapabilitiesById,
+		false
 	);
 
 	let webSearchCapableModels = [];
@@ -818,6 +837,19 @@
 			return null;
 		}
 
+		// Every selected model opted out of file processing, OR every selected
+		// model opted into native file input: upload raw, no extraction.
+		const allNativeFileInput =
+			selectedModelIds.length > 0 &&
+			nativeFileInputCapableModels.length === selectedModelIds.length;
+		const skipProcessing =
+			process &&
+			selectedModelIds.length > 0 &&
+			(fileProcessingCapableModels.length === 0 || allNativeFileInput);
+		if (skipProcessing) {
+			process = false;
+		}
+
 		const tempItemId = uuidv4();
 		const fileItem = {
 			type: 'file',
@@ -833,6 +865,7 @@
 			// Stamp the user's default upload mode so the sent payload carries it;
 			// the per-file toggle in FileItemModal can still override it afterwards.
 			...($settings?.defaultUploadContext === 'full' ? { context: 'full' } : {}),
+			...(skipProcessing ? { processed: false } : {}),
 			...itemData
 		};
 
@@ -894,6 +927,21 @@
 				onUpdate({ file: fileItem });
 			}
 		} else {
+			// Native file input needs server-stored bytes; temporary chats are
+			// client-side only and cannot forward PDFs to the provider.
+			const nativeFileInputEnabled =
+				selectedModelIds.length > 0 &&
+				nativeFileInputCapableModels.length === selectedModelIds.length;
+			if (skipProcessing && nativeFileInputEnabled) {
+				toast.error(
+					$i18n.t(
+						'Native File Input requires a saved chat. Disable Temporary Chat to attach documents for the provider.'
+					)
+				);
+				files = files.filter((item) => item?.itemId !== tempItemId);
+				return null;
+			}
+
 			// If temporary chat is enabled, we just add the file to the list without uploading it.
 
 			const content = await extractContentFromFile(file).catch((error) => {

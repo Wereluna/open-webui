@@ -41,6 +41,11 @@ from open_webui.models.users import UserModel
 from open_webui.utils.access_control import check_model_access, has_connection_access, has_permission
 from open_webui.utils.anthropic import get_anthropic_models, is_anthropic_url
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.files import (
+    NATIVE_FILE_PART_MARKER,
+    append_native_file_inputs_to_messages,
+    get_native_file_input_enabled,
+)
 from open_webui.utils.headers import get_custom_headers, include_user_info_headers
 from open_webui.utils.json_codec import JSONCodec
 from open_webui.utils.misc import (
@@ -1094,6 +1099,16 @@ def convert_to_responses_payload(payload: dict) -> dict:
                     url_data = part.get('image_url', {})
                     url = url_data.get('url', '') if isinstance(url_data, dict) else url_data
                     content_parts.append({'type': 'input_image', 'image_url': url})
+                elif part.get('type') == 'file' and part.get(NATIVE_FILE_PART_MARKER) is True:
+                    # Only server-attached native PDFs (marker set by append_native_file_inputs).
+                    file_data = part.get('file') or {}
+                    content_parts.append(
+                        {
+                            'type': 'input_file',
+                            'filename': file_data.get('filename') or 'document.pdf',
+                            'file_data': file_data.get('file_data', ''),
+                        }
+                    )
         else:
             content_parts = [{'type': text_type, 'text': str(content)}]
 
@@ -1290,6 +1305,22 @@ async def generate_chat_completion(
     headers, cookies = await get_headers_and_cookies(request, url, key, api_config, metadata, user=user)
 
     is_responses = api_config.get('api_type') == 'responses'
+
+    # Forward raw PDF attachments to Responses API as native input_file parts.
+    # Capability comes from the server MODELS pool / Models DB — never client metadata.
+    form_model_id = form_data.get('model') or model_id
+    server_model = (request.app.state.MODELS or {}).get(form_model_id) or {}
+    native_file_input_enabled = get_native_file_input_enabled(
+        server_model=server_model,
+        model_info=model_info,
+    )
+    payload = await append_native_file_inputs_to_messages(
+        payload,
+        metadata,
+        native_file_input_enabled=native_file_input_enabled,
+        is_responses=is_responses,
+        user=user,
+    )
 
     if api_config.get('azure') or api_config.get('provider') == 'azure':
         # Only set api-key header if not using Azure Entra ID authentication

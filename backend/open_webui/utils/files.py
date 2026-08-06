@@ -23,12 +23,12 @@ from open_webui.models.chats import Chats
 from open_webui.models.files import Files
 from open_webui.retrieval.web.utils import get_ssrf_safe_session, validate_url
 from open_webui.routers.files import upload_file_handler
-from open_webui.utils.access_control.files import has_access_to_file
 from open_webui.routers.images import (
     get_image_data,
     upload_image,
 )
 from open_webui.storage.provider import Storage
+from open_webui.utils.access_control.files import has_access_to_file
 
 BASE64_IMAGE_URL_PREFIX = re.compile(r'data:image/\w+;base64,', re.IGNORECASE)
 MARKDOWN_IMAGE_URL_PATTERN = re.compile(r'!\[(.*?)\]\((.+?)\)', re.IGNORECASE)
@@ -213,3 +213,260 @@ async def get_image_base64_from_file_id(id: str, user=None) -> Optional[str]:
             return None
     except Exception:
         return None
+
+
+# OpenAI Responses file-input limits (docs: ~50MB/file, ~50MB total request).
+# Base64 expands by 4/3, so keep raw budgets below the wire limit.
+NATIVE_FILE_INPUT_MAX_COUNT = 5
+NATIVE_FILE_INPUT_MAX_BYTES = 32 * 1024 * 1024  # per file, before base64
+NATIVE_FILE_INPUT_MAX_TOTAL_BYTES = 36 * 1024 * 1024  # sum of raw bytes in one request
+_NATIVE_PDF_MIME_TYPES = {'application/pdf', 'application/x-pdf'}
+NATIVE_FILE_PART_MARKER = '_owui_native_file'
+
+
+def get_native_file_input_enabled(*, server_model: dict | None = None, model_info=None) -> bool:
+    """
+    Resolve native_file_input from server-built model state only.
+
+    Prefer the MODELS pool entry (includes workspace + global defaults). Fall back
+    to Models DB model_info. Never read client-supplied metadata.model.
+    """
+    if isinstance(server_model, dict):
+        caps = ((server_model.get('info') or {}).get('meta') or {}).get('capabilities')
+        if isinstance(caps, dict):
+            return bool(caps.get('native_file_input', False))
+
+    if model_info is not None:
+        info_meta = getattr(model_info, 'meta', None)
+        if info_meta is not None:
+            info_caps = getattr(info_meta, 'capabilities', None) or {}
+            if isinstance(info_caps, dict):
+                return bool(info_caps.get('native_file_input', False))
+
+    return False
+
+
+def _is_native_pdf_candidate(filename: str, content_type: str | None) -> bool:
+    mime = (content_type or '').split(';', 1)[0].strip().lower()
+    if mime in _NATIVE_PDF_MIME_TYPES:
+        return True
+    return (filename or '').lower().endswith('.pdf')
+
+
+def _raw_files_for_native_input(metadata: dict | None) -> list:
+    """
+    Prefer current-turn attachments from user_message.files when present so
+    follow-up text turns do not re-inject every historical raw PDF.
+    """
+    metadata = metadata or {}
+    user_message = metadata.get('user_message')
+    if isinstance(user_message, dict):
+        candidates = user_message.get('files') or []
+    else:
+        candidates = metadata.get('files') or []
+
+    return [
+        item for item in candidates if item.get('type') == 'file' and item.get('processed') is False and item.get('id')
+    ]
+
+
+def strip_untrusted_file_content_parts(payload: dict) -> dict:
+    """Remove client-supplied file parts so only server-attached natives are forwarded."""
+    for message in payload.get('messages') or []:
+        content = message.get('content')
+        if not isinstance(content, list):
+            continue
+        message['content'] = [part for part in content if part.get('type') not in ('file', 'native_file', 'input_file')]
+    return payload
+
+
+async def get_pdf_file_data_uri_from_file_id(
+    id: str,
+    user=None,
+    *,
+    remaining_total_budget: int | None = None,
+) -> tuple[str, str, str, int]:
+    """
+    Load a PDF attachment as a data URI for native provider file inputs.
+
+    Returns (filename, mime_type, data_uri, raw_size_bytes).
+    Raises HTTPException on failure.
+    """
+    if user is None:
+        raise HTTPException(status_code=401, detail='Authentication required to read file attachments')
+
+    file = await Files.get_file_by_id(id)
+    if not file or not file.path:
+        raise HTTPException(status_code=404, detail=f'File not found: {id}')
+
+    if file.user_id != user.id and user.role != 'admin' and not await has_access_to_file(file.id, 'read', user):
+        raise HTTPException(status_code=403, detail=f'Access denied to file: {id}')
+
+    filename = (file.meta or {}).get('name') or file.filename or f'{id}.pdf'
+    content_type = (file.meta or {}).get('content_type') or mimetypes.guess_type(filename)[0]
+
+    if not _is_native_pdf_candidate(filename, content_type):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f'Native file input currently supports PDF only; '
+                f'received "{filename}" ({content_type or "unknown type"}).'
+            ),
+        )
+
+    try:
+        file_path = await asyncio.to_thread(Storage.get_file, file.path)
+        file_path = Path(file_path)
+        if not file_path.is_file():
+            raise HTTPException(status_code=404, detail=f'File content missing on disk: {id}')
+
+        try:
+            st_size = file_path.stat().st_size
+        except OSError:
+            st_size = 0
+
+        if st_size > NATIVE_FILE_INPUT_MAX_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f'Native file input exceeds the {NATIVE_FILE_INPUT_MAX_BYTES // (1024 * 1024)}MB '
+                    f'per-file limit ({filename}: {st_size} bytes).'
+                ),
+            )
+        if remaining_total_budget is not None and st_size > remaining_total_budget:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f'Native file input exceeds the {NATIVE_FILE_INPUT_MAX_TOTAL_BYTES // (1024 * 1024)}MB '
+                    f'total attachment budget for this request ({filename}).'
+                ),
+            )
+
+        async with aiofiles.open(file_path, 'rb') as pdf_file:
+            raw = await pdf_file.read()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f'Failed to read file {id}: {e}') from e
+
+    raw_size = len(raw)
+    if raw_size > NATIVE_FILE_INPUT_MAX_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f'Native file input exceeds the {NATIVE_FILE_INPUT_MAX_BYTES // (1024 * 1024)}MB '
+                f'per-file limit ({filename}: {raw_size} bytes).'
+            ),
+        )
+    if remaining_total_budget is not None and raw_size > remaining_total_budget:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f'Native file input exceeds the {NATIVE_FILE_INPUT_MAX_TOTAL_BYTES // (1024 * 1024)}MB '
+                f'total attachment budget for this request ({filename}).'
+            ),
+        )
+    if not raw.startswith(b'%PDF-'):
+        raise HTTPException(
+            status_code=400,
+            detail=f'Native file input requires a PDF document; "{filename}" is not a valid PDF.',
+        )
+
+    mime = 'application/pdf'
+    encoded = (await asyncio.to_thread(base64.b64encode, raw)).decode('utf-8')
+    del raw
+    return filename, mime, f'data:{mime};base64,{encoded}', raw_size
+
+
+async def append_native_file_inputs_to_messages(
+    payload: dict,
+    metadata: dict | None,
+    *,
+    native_file_input_enabled: bool,
+    is_responses: bool,
+    user,
+) -> dict:
+    """
+    Append server-trusted PDF parts on the latest user message for Responses mapping.
+
+    Only current-turn processed=false attachments are considered. Fail closed when
+    raw attachments are present but native_file_input is off, or when the
+    connection is not Responses API.
+    """
+    # Never forward client-injected file parts.
+    payload = strip_untrusted_file_content_parts(payload)
+
+    raw_files = _raw_files_for_native_input(metadata)
+    if not raw_files:
+        return payload
+
+    if not native_file_input_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                'Unprocessed file attachments require the Native File Input model capability '
+                'on this OpenAI connection (or enable File Processing to extract text).'
+            ),
+        )
+
+    if not is_responses:
+        raise HTTPException(
+            status_code=400,
+            detail='Native file input requires an OpenAI connection with api_type set to "responses".',
+        )
+
+    if len(raw_files) > NATIVE_FILE_INPUT_MAX_COUNT:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f'Native file input allows at most {NATIVE_FILE_INPUT_MAX_COUNT} raw attachments '
+                f'per request (received {len(raw_files)}).'
+            ),
+        )
+
+    file_parts = []
+    remaining_budget = NATIVE_FILE_INPUT_MAX_TOTAL_BYTES
+    for item in raw_files:
+        filename, _mime, data_uri, raw_size = await get_pdf_file_data_uri_from_file_id(
+            item['id'],
+            user=user,
+            remaining_total_budget=remaining_budget,
+        )
+        remaining_budget -= raw_size
+        display_name = item.get('name') or item.get('filename') or filename
+        file_parts.append(
+            {
+                'type': 'file',
+                NATIVE_FILE_PART_MARKER: True,
+                'file': {
+                    'filename': display_name,
+                    'file_data': data_uri,
+                },
+            }
+        )
+
+    messages = payload.get('messages') or []
+    if not messages:
+        raise HTTPException(status_code=400, detail='Cannot attach native files without a user message')
+
+    target_idx = None
+    for idx in range(len(messages) - 1, -1, -1):
+        if messages[idx].get('role') == 'user':
+            target_idx = idx
+            break
+    if target_idx is None:
+        raise HTTPException(status_code=400, detail='Cannot attach native files without a user message')
+
+    message = messages[target_idx]
+    content = message.get('content', '')
+    if isinstance(content, str):
+        content_parts = [{'type': 'text', 'text': content}] if content else []
+    elif isinstance(content, list):
+        content_parts = list(content)
+    else:
+        content_parts = [{'type': 'text', 'text': str(content)}]
+
+    message['content'] = file_parts + content_parts
+    messages[target_idx] = message
+    payload['messages'] = messages
+    return payload
